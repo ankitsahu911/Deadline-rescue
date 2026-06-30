@@ -22,6 +22,9 @@ app.add_middleware(
   allow_origins=[
     "https://deadline-rescue-mjyj-sandy.vercel.app",
     "http://localhost:3000",  # keep this for local testing
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
   ],
   allow_credentials=True,
   allow_methods=["*"],
@@ -43,6 +46,13 @@ class ReflectInput(BaseModel):
 
 class CompleteCalendarInput(BaseModel):
     event_id: str
+
+class ScheduleEventInput(BaseModel):
+    title: str = Field(min_length=1)
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    start_hour: int = Field(default=18, ge=0, le=23)
+    duration_hours: float = Field(default=1, gt=0, le=24)
+    description: str = ""
 
 class TaskEmailInput(BaseModel):
     email: str
@@ -105,14 +115,17 @@ async def get_calendar(date: str):
     return get_free_slots(date)
 
 @app.post("/schedule-event")
-async def schedule_event(data: dict):
-    return create_event(
-        title=data["title"],
-        date_str=data["date"],
-        start_hour=data["start_hour"],
-        duration_hours=data["duration_hours"],
-        description=data.get("description", "")
-    )
+async def schedule_event(data: ScheduleEventInput):
+    try:
+        return create_event(
+            title=data.title,
+            date_str=data.date,
+            start_hour=data.start_hour,
+            duration_hours=data.duration_hours,
+            description=data.description
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Calendar event could not be created: {e}")
 
 @app.post("/calendar/complete-event")
 async def complete_calendar_event(data: CompleteCalendarInput):
@@ -260,11 +273,18 @@ async def send_task_email(data: TaskEmailInput):
         msg["To"] = data.email
         msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
             server.login(email_from, email_password)
             server.sendmail(email_from, data.email, msg.as_string())
 
         return {"message": "Email sent successfully"}
+    except smtplib.SMTPAuthenticationError as e:
+        raise HTTPException(
+            status_code=500,
+            detail="Gmail authentication failed. Use a Gmail App Password in EMAIL_PASSWORD, not your normal Google password."
+        ) from e
+    except (smtplib.SMTPException, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"Email could not be sent: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

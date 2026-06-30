@@ -1,5 +1,5 @@
 import os
-import json
+from pathlib import Path
 from datetime import datetime, timedelta
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -7,25 +7,38 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
+BASE_DIR = Path(__file__).resolve().parent
+CREDENTIALS_PATH = BASE_DIR / 'credentials.json'
+TOKEN_PATH = BASE_DIR / 'token.json'
 
 def get_calendar_service():
     creds = None
 
     # Load saved token if exists
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if TOKEN_PATH.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
 
     # If no valid credentials, login
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as exc:
+                raise RuntimeError(
+                    "Google Calendar token could not be refreshed. Run backend/test_auth.py once to create a fresh token.json."
+                ) from exc
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            if not CREDENTIALS_PATH.exists():
+                raise RuntimeError("Missing backend/credentials.json for Google Calendar OAuth.")
+            if os.getenv("GOOGLE_CALENDAR_INTERACTIVE_AUTH") != "1":
+                raise RuntimeError(
+                    "Google Calendar is not authorized. Run backend/test_auth.py once, or set GOOGLE_CALENDAR_INTERACTIVE_AUTH=1 for local OAuth setup."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
             creds = flow.run_local_server(port=0)
 
         # Save token for next time
-        with open('token.json', 'w') as f:
-            f.write(creds.to_json())
+        TOKEN_PATH.write_text(creds.to_json(), encoding='utf-8')
 
     return build('calendar', 'v3', credentials=creds)
 
@@ -64,11 +77,28 @@ def create_event(title: str, date_str: str, start_hour: int, duration_hours: flo
     """Create a calendar event"""
     service = get_calendar_service()
 
-    start_time = datetime.strptime(f"{date_str} {start_hour}:00", "%Y-%m-%d %H:%M")
-    end_time = start_time + timedelta(hours=duration_hours)
+    try:
+        hour = int(start_hour)
+        if hour < 0 or hour > 23:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("start_hour must be an integer from 0 to 23.") from exc
+
+    try:
+        duration = float(duration_hours)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("duration_hours must be a number.") from exc
+    duration = max(0.25, min(duration, 24))
+
+    try:
+        start_time = datetime.strptime(f"{date_str} {hour}:00", "%Y-%m-%d %H:%M")
+    except ValueError as exc:
+        raise ValueError("date must be in YYYY-MM-DD format.") from exc
+
+    end_time = start_time + timedelta(hours=duration)
 
     event = {
-        'summary': f"🤖 {title}",
+        'summary': f"AI Deadline Rescue - {title}",
         'description': f"Scheduled by AI Deadline Rescue\n\n{description}",
         'start': {
             'dateTime': start_time.isoformat()+'+05:30',

@@ -130,7 +130,39 @@ function readStoredJson<T>(key: string, fallback: T): T {
 const readSavedUser = () => readStoredJson<User | null>("dr_user", null);
 const readSavedTasks = (uid?: string) => (uid ? readStoredJson<Task[]>(`dr_tasks_${uid}`, []) : []);
 const readSavedNotes = (uid?: string) => (uid ? readStoredJson<Note[]>(`dr_notes_${uid}`, []) : []);
+type CalendarStatus = "idle" | "syncing" | "done" | "error";
 type EmailStatus = "idle" | "sending" | "sent" | "error";
+type ApiErrorBody = { detail?: string | { msg?: string }[] };
+
+const requestTimeoutMessage = "The backend took too long to respond. Check the backend terminal/logs and try again.";
+
+async function readApiError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = (await res.json()) as ApiErrorBody;
+    if (typeof data.detail === "string") return data.detail;
+    if (Array.isArray(data.detail)) {
+      return data.detail.map((item) => item.msg).filter(Boolean).join("; ") || fallback;
+    }
+  } catch {
+    // Use the fallback when the backend returned non-JSON.
+  }
+  return fallback;
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 25000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(requestTimeoutMessage);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 // Circular risk gauge - the signature element
 function RiskGauge({ score, size = 64 }: { score: number; size?: number }) {
@@ -389,8 +421,10 @@ export default function Home() {
   const [showReflect, setShowReflect] = useState(false);
   const [reflectTaskId, setReflectTaskId] = useState<string | null>(null);
   const [actualHours, setActualHours] = useState("");
-  const [calendarStatus, setCalendarStatus] = useState<Record<string, "idle" | "syncing" | "done" | "error">>({});
+  const [calendarStatus, setCalendarStatus] = useState<Record<string, CalendarStatus>>({});
+  const [calendarError, setCalendarError] = useState<Record<string, string>>({});
   const [emailStatus, setEmailStatus] = useState<Record<string, EmailStatus>>({});
+  const [emailError, setEmailError] = useState<Record<string, string>>({});
   const [emailCopied, setEmailCopied] = useState(false);
 
   // Notes state
@@ -531,19 +565,22 @@ export default function Home() {
   // -- CALENDAR --
   const addToCalendar = async (task: Task) => {
     setCalendarStatus((s) => ({ ...s, [task.id]: "syncing" }));
+    setCalendarError((s) => ({ ...s, [task.id]: "" }));
+    const effortHours = Number(task.effort_hours);
+    const durationHours = Number.isFinite(effortHours) ? Math.max(0.25, effortHours) : 1;
     try {
-      const res = await fetch(`${API}/schedule-event`, {
+      const res = await fetchWithTimeout(`${API}/schedule-event`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: task.task_name,
           date: task.deadline,
           start_hour: 18,
-          duration_hours: task.effort_hours,
+          duration_hours: durationHours,
           description: task.risk_reason,
         }),
       });
-      if (!res.ok) throw new Error("bad response");
+      if (!res.ok) throw new Error(await readApiError(res, "Calendar event could not be created."));
       const data: { event_id: string; link?: string } = await res.json();
       setCalendarStatus((s) => ({ ...s, [task.id]: "done" }));
       saveTasks(tasks.map((t) => (
@@ -551,8 +588,12 @@ export default function Home() {
           ? { ...t, calendar_synced: true, calendar_event_id: data.event_id, calendar_link: data.link }
           : t
       )));
-    } catch {
+    } catch (error) {
       setCalendarStatus((s) => ({ ...s, [task.id]: "error" }));
+      setCalendarError((s) => ({
+        ...s,
+        [task.id]: error instanceof Error ? error.message : "Calendar event could not be created.",
+      }));
     }
   };
 
@@ -571,8 +612,9 @@ export default function Home() {
     }
 
     setEmailStatus((s) => ({ ...s, [task.id]: "sending" }));
+    setEmailError((s) => ({ ...s, [task.id]: "" }));
     try {
-      const res = await fetch(`${API}/send-task-email`, {
+      const res = await fetchWithTimeout(`${API}/send-task-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -593,10 +635,14 @@ export default function Home() {
           shock_scenarios: buildShockScenarios(task),
         }),
       });
-      if (!res.ok) throw new Error("bad response");
+      if (!res.ok) throw new Error(await readApiError(res, "Email could not be sent."));
       setEmailStatus((s) => ({ ...s, [task.id]: "sent" }));
-    } catch {
+    } catch (error) {
       setEmailStatus((s) => ({ ...s, [task.id]: "error" }));
+      setEmailError((s) => ({
+        ...s,
+        [task.id]: error instanceof Error ? error.message : "Email could not be sent.",
+      }));
     }
   };
 
@@ -995,7 +1041,9 @@ export default function Home() {
               </div>
             )}
             {calendarStatus[selectedTask.id] === "error" && (
-              <p style={{ fontSize: "0.78rem", color: PALETTE.red, marginTop: "-0.5rem", marginBottom: "1rem" }}>Couldn&apos;t reach the calendar service - make sure the backend is running.</p>
+              <p style={{ fontSize: "0.78rem", color: PALETTE.red, marginTop: "-0.5rem", marginBottom: "1rem" }}>
+                {calendarError[selectedTask.id] || "Calendar event could not be created. Check the backend logs."}
+              </p>
             )}
 
             {/* Email report */}
@@ -1010,7 +1058,9 @@ export default function Home() {
                     : "Send yourself a pending-task reminder with risk, roadmap, time required, and rescue plan."}
                 </p>
                 {emailStatus[selectedTask.id] === "error" && (
-                  <p style={{ fontSize: "0.76rem", color: PALETTE.red, marginTop: "0.35rem" }}>Email failed. Check backend .env EMAIL_FROM and EMAIL_PASSWORD.</p>
+                  <p style={{ fontSize: "0.76rem", color: PALETTE.red, marginTop: "0.35rem" }}>
+                    {emailError[selectedTask.id] || "Email failed. Check backend .env EMAIL_FROM and EMAIL_PASSWORD."}
+                  </p>
                 )}
               </div>
               <button onClick={() => sendTaskEmail(selectedTask)} disabled={emailStatus[selectedTask.id] === "sending"}
