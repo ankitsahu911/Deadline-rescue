@@ -1,0 +1,24 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: deadline-rescue-backend
+    env_file:
+      - ./backend/.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/chroma_db:/app/chroma_db
+      - ./backend/credentials.json:/app/credentials.json:ro
+      - ./backend/token.json:/app/token.json
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend-app
+    container_name: deadline-rescue-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
