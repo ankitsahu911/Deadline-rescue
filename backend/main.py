@@ -16,12 +16,16 @@ import uuid
 load_dotenv()
 app = FastAPI()
 
-# Allow frontend to call backend
+# Allow frontend to call backend (restrict origins for security)
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+  CORSMiddleware,
+  allow_origins=[
+    "https://deadline-rescue-mjyj-sandy.vercel.app",
+    "http://localhost:3000",  # keep this for local testing
+  ],
+  allow_credentials=True,
+  allow_methods=["*"],
+  allow_headers=["*"],
 )
 
 class TaskInput(BaseModel):
