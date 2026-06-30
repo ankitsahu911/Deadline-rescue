@@ -37,6 +37,7 @@ type Task = {
   calendar_synced?: boolean;
   calendar_event_id?: string;
   calendar_link?: string;
+  calendar_email?: string;
   actual_hours?: number;
   created_at: string;
 };
@@ -115,6 +116,43 @@ function buildShockScenarios(task: Task): ShockScenario[] {
     { label: "Delay 2 days", risk_score: bump(Math.round(base + 45)) },
     { label: "Cancel one low-priority task", risk_score: bump(Math.round(base * 0.7)) },
   ];
+}
+
+const toLocalDateString = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+function scheduleHourFromPlan(task: Task): number | null {
+  const schedule = task.rescue_mode ? task.final_plan.emergency_schedule : task.final_plan.schedule;
+  const rawTime = schedule?.[0]?.time;
+  const match = rawTime?.match(/^(\d{1,2})(?::\d{2})?/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  return Number.isFinite(hour) ? Math.max(0, Math.min(23, hour)) : null;
+}
+
+function calendarSlotForTask(task: Task): { date: string; startHour: number } {
+  const now = new Date();
+  const today = toLocalDateString(now);
+  let date = task.deadline < today ? today : task.deadline;
+  let startHour = scheduleHourFromPlan(task) ?? 18;
+
+  if (date === today && startHour <= now.getHours()) {
+    const nextHour = now.getHours() + 1;
+    if (nextHour <= 23) {
+      startHour = nextHour;
+    } else {
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      date = toLocalDateString(tomorrow);
+      startHour = 9;
+    }
+  }
+
+  return { date, startHour };
 }
 
 function readStoredJson<T>(key: string, fallback: T): T {
@@ -568,27 +606,40 @@ export default function Home() {
     setCalendarError((s) => ({ ...s, [task.id]: "" }));
     const effortHours = Number(task.effort_hours);
     const durationHours = Number.isFinite(effortHours) ? Math.max(0.25, effortHours) : 1;
+    const { date, startHour } = calendarSlotForTask(task);
+    const eventWindow = window.open("about:blank", "_blank");
+    eventWindow?.document.write("<p style=\"font-family: system-ui, sans-serif; padding: 24px;\">Creating Google Calendar event...</p>");
     try {
       const res = await fetchWithTimeout(`${API}/schedule-event`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: task.task_name,
-          date: task.deadline,
-          start_hour: 18,
+          date,
+          start_hour: startHour,
           duration_hours: durationHours,
           description: task.risk_reason,
         }),
       });
       if (!res.ok) throw new Error(await readApiError(res, "Calendar event could not be created."));
-      const data: { event_id: string; link?: string } = await res.json();
+      const data: { event_id: string; link?: string; calendar_email?: string } = await res.json();
       setCalendarStatus((s) => ({ ...s, [task.id]: "done" }));
       saveTasks(tasks.map((t) => (
         t.id === task.id
-          ? { ...t, calendar_synced: true, calendar_event_id: data.event_id, calendar_link: data.link }
+          ? { ...t, calendar_synced: true, calendar_event_id: data.event_id, calendar_link: data.link, calendar_email: data.calendar_email }
           : t
       )));
+      if (data.link) {
+        if (eventWindow) {
+          eventWindow.location.href = data.link;
+        } else {
+          window.open(data.link, "_blank", "noopener,noreferrer");
+        }
+      } else {
+        eventWindow?.close();
+      }
     } catch (error) {
+      eventWindow?.close();
       setCalendarStatus((s) => ({ ...s, [task.id]: "error" }));
       setCalendarError((s) => ({
         ...s,
@@ -973,11 +1024,15 @@ export default function Home() {
                   </button>
                   <button onClick={() => addToCalendar(selectedTask)}
                     style={{ padding: "0.65rem 0.9rem", background: "#fff", border: `1px solid ${PALETTE.red}40`, borderRadius: "10px", cursor: "pointer", fontSize: "0.82rem", fontWeight: 600, color: PALETTE.ink, textAlign: "left" }}>
-                    Add emergency plan to Calendar
+                    {calendarStatus[selectedTask.id] === "syncing"
+                      ? "Adding emergency plan..."
+                      : calendarStatus[selectedTask.id] === "done" || selectedTask.calendar_synced
+                        ? "Emergency plan added"
+                        : "Add emergency plan to Calendar"}
                   </button>
                   <button onClick={() => openGoogleCalendar(selectedTask)}
                     style={{ padding: "0.65rem 0.9rem", background: "#fff", border: `1px solid ${PALETTE.red}40`, borderRadius: "10px", cursor: "pointer", fontSize: "0.82rem", fontWeight: 600, color: PALETTE.ink, textAlign: "left" }}>
-                    Open Google Calendar
+                    {selectedTask.calendar_link ? "Open Calendar Event" : "Open Google Calendar"}
                   </button>
                   {selectedTask.final_plan?.extension_email && (
                     <button onClick={() => copyExtensionEmail(selectedTask.final_plan.extension_email!)}
@@ -1025,7 +1080,9 @@ export default function Home() {
                 <div>
                   <h3 style={{ fontSize: "0.9rem", fontWeight: 600, color: PALETTE.ink, marginBottom: "0.2rem" }}>Google Calendar</h3>
                   <p style={{ fontSize: "0.78rem", color: PALETTE.inkFaint }}>
-                    {calendarStatus[selectedTask.id] === "done" || selectedTask.calendar_synced ? "This plan is on your calendar." : "Add the recommended schedule to your calendar."}
+                    {calendarStatus[selectedTask.id] === "done" || selectedTask.calendar_synced
+                      ? `This plan is on ${selectedTask.calendar_email || "your Google Calendar"}.`
+                      : "Add the recommended schedule to your calendar."}
                   </p>
                 </div>
                 <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>

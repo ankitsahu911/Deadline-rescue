@@ -117,7 +117,8 @@ def create_event(title: str, date_str: str, start_hour: int, duration_hours: flo
         "title": title,
         "start": start_time.strftime("%Y-%m-%d %H:%M"),
         "end": end_time.strftime("%Y-%m-%d %H:%M"),
-        "link": created.get('htmlLink')
+        "link": created.get('htmlLink'),
+        "calendar_email": created.get('organizer', {}).get('email') or created.get('creator', {}).get('email')
     }
 
 def mark_event_completed(event_id: str):
