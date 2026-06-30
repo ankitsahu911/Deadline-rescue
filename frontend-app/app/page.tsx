@@ -173,6 +173,7 @@ type EmailStatus = "idle" | "sending" | "sent" | "error";
 type ApiErrorBody = { detail?: string | { msg?: string }[] };
 
 const requestTimeoutMessage = "The backend took too long to respond. Check the backend terminal/logs and try again.";
+const apiReachabilityMessage = `Could not reach the backend at ${API}. Make sure the backend is running and this page is allowed by CORS.`;
 
 async function readApiError(res: Response, fallback: string): Promise<string> {
   try {
@@ -187,7 +188,7 @@ async function readApiError(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 25000): Promise<Response> {
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 60000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -195,6 +196,9 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error(requestTimeoutMessage);
+    }
+    if (error instanceof TypeError) {
+      throw new Error(apiReachabilityMessage);
     }
     throw error;
   } finally {

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from dotenv import load_dotenv
 from graph.workflow import graph
 from rag.vectordb import store_task, retrieve_similar
@@ -26,10 +27,16 @@ app.add_middleware(
     "http://localhost:3001",
     "http://127.0.0.1:3001",
   ],
+  allow_origin_regex=r"https://.*\.vercel\.app",
   allow_credentials=True,
   allow_methods=["*"],
   allow_headers=["*"],
 )
+
+def send_email_message(email_from: str, email_password: str, email_to: str, msg: MIMEMultipart):
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+        server.login(email_from, email_password)
+        server.sendmail(email_from, email_to, msg.as_string())
 
 class TaskInput(BaseModel):
     task_name: str
@@ -112,12 +119,13 @@ async def analyze_task(task: TaskInput):
 
 @app.get("/calendar/{date}")
 async def get_calendar(date: str):
-    return get_free_slots(date)
+    return await run_in_threadpool(get_free_slots, date)
 
 @app.post("/schedule-event")
 async def schedule_event(data: ScheduleEventInput):
     try:
-        return create_event(
+        return await run_in_threadpool(
+            create_event,
             title=data.title,
             date_str=data.date,
             start_hour=data.start_hour,
@@ -129,7 +137,7 @@ async def schedule_event(data: ScheduleEventInput):
 
 @app.post("/calendar/complete-event")
 async def complete_calendar_event(data: CompleteCalendarInput):
-    return mark_event_completed(data.event_id)
+    return await run_in_threadpool(mark_event_completed, data.event_id)
 
 @app.post("/send-task-email")
 async def send_task_email(data: TaskEmailInput):
@@ -273,9 +281,7 @@ async def send_task_email(data: TaskEmailInput):
         msg["To"] = data.email
         msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
-            server.login(email_from, email_password)
-            server.sendmail(email_from, data.email, msg.as_string())
+        await run_in_threadpool(send_email_message, email_from, email_password, data.email, msg)
 
         return {"message": "Email sent successfully"}
     except smtplib.SMTPAuthenticationError as e:
